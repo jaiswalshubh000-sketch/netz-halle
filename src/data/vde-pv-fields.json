@@ -1,0 +1,12 @@
+[
+  { "id": "1102", "name": "Vorname", "type": "string", "category": "Anschlussnutzer" },
+  { "id": "1101", "name": "Name oder Firmenname", "type": "string", "category": "Anschlussnutzer" },
+  { "id": "1110", "name": "E-Mail", "type": "string", "category": "Anschlussnutzer" },
+  { "id": "1109", "name": "Telefon", "type": "string", "category": "Anschlussnutzer" },
+  { "id": "1002", "name": "Straße", "type": "string", "category": "Anlagenstandort" },
+  { "id": "1007", "name": "PLZ", "type": "string", "category": "Anlagenstandort" },
+  { "id": "1008", "name": "Ort", "type": "string", "category": "Anlagenstandort" },
+  { "id": "3101", "name": "Gesamtleistung aller PV-Module (kWp)", "type": "number", "category": "Erzeugungsanlage PV-Module" },
+  { "id": "2021", "name": "Anschlussnetzbetreiber-Bestätigung", "type": "string", "category": "Kundenanlage" },
+  { "id": "1111", "name": "IBAN", "type": "string", "category": "Anschlussnutzer" }
+]

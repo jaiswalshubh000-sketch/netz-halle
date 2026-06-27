@@ -1,0 +1,10 @@
+{
+  "name": "TINA Netz Halle PV Portal",
+  "description": "Customer service portal for registering PV systems via multiple channels including voice callbacks.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
