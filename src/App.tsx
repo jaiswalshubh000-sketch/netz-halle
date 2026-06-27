@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Mail, Phone, Printer, Send, FileJson, FileText, CheckCircle, AlertCircle, Loader2, MessageSquare, Bell, Smartphone, ExternalLink, Zap, Download, Table, Clock, Inbox } from 'lucide-react';
+import { Mail, Phone, Printer, Send, FileJson, FileText, CheckCircle, AlertCircle, Loader2, MessageSquare, Bell, Smartphone, ExternalLink, Zap, Download, Table, Clock, Inbox, Users, LayoutDashboard, Calendar, History, UserCircle } from 'lucide-react';
 import { CanonicalData } from './canonical/types';
 import { mapCanonicalToVDE } from './adapters/vde';
 import { generateMissingFieldsResponse } from './respond';
@@ -124,6 +124,8 @@ export default function App() {
   const [notifications, setNotifications] = useState<{id: number, text: string, channel: string}[]>([]);
   const [excelDownloadUrl, setExcelDownloadUrl] = useState<string>('');
   const [now, setNow] = useState(Date.now());
+  const [activeTab, setActiveTab] = useState<'inbox' | 'crm'>('inbox');
+  const [activeCrmCustomerId, setActiveCrmCustomerId] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 10000);
@@ -132,6 +134,41 @@ export default function App() {
 
   const activeItem = useMemo(() => inboxItems.find(i => i.id === activeItemId), [inboxItems, activeItemId]);
   const processedRecords = useMemo(() => inboxItems.filter(i => i.status === 'processed' && i.canonicalData), [inboxItems]);
+
+  const crmCustomers = useMemo(() => {
+    const map = new Map<string, { id: string, name: string, email: string, phone: string, firstContact: number, logs: InboxItem[], status: string }>();
+    
+    // Sort by timestamp asc so firstContact is correct
+    const sorted = [...inboxItems].sort((a, b) => a.timestamp - b.timestamp);
+    
+    sorted.forEach(item => {
+      if (item.canonicalData) {
+        const can = item.canonicalData.applicant;
+        const key = can.email || can.phone || item.id;
+        
+        if (!map.has(key)) {
+          map.set(key, {
+            id: key,
+            name: `${can.firstName} ${can.lastName}`.trim() || 'Unknown Customer',
+            email: can.email,
+            phone: can.phone,
+            firstContact: item.timestamp,
+            logs: [],
+            status: item.canonicalData.missing_mandatory_fields.length === 0 ? 'Complete' : 'Incomplete'
+          });
+        }
+        
+        const customer = map.get(key)!;
+        customer.logs.push(item);
+        // Update status to latest
+        customer.status = item.canonicalData.missing_mandatory_fields.length === 0 ? 'Complete' : 'Incomplete';
+      }
+    });
+    
+    return Array.from(map.values()).sort((a, b) => b.firstContact - a.firstContact);
+  }, [inboxItems]);
+
+  const activeCrmCustomer = useMemo(() => crmCustomers.find(c => c.id === activeCrmCustomerId), [crmCustomers, activeCrmCustomerId]);
 
   const handleProcess = async (itemToProcess: InboxItem) => {
     setInboxItems(prev => prev.map(item => item.id === itemToProcess.id ? { ...item, status: 'processing' } : item));
@@ -332,29 +369,45 @@ export default function App() {
       </div>
 
       {/* Header */}
-      <header className="bg-red-600 text-white py-6 px-6 shadow-md mb-6 shrink-0">
-        <div className="max-w-7xl mx-auto flex flex-col gap-2">
+      <header className="bg-red-600 text-white py-6 px-6 shadow-md shrink-0">
+        <div className="max-w-7xl mx-auto flex flex-col gap-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
              <div>
                <div className="flex items-center gap-3">
                  <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center shadow-sm">
                    <div className="w-6 h-6 bg-red-600 rounded-sm transform rotate-45"></div>
                  </div>
-                 <h1 className="text-3xl font-bold tracking-tight">Netz Halle</h1>
+                 <h1 className="text-3xl font-bold tracking-tight">EVH - Energieversorgung Halle</h1>
                </div>
                <h2 className="text-xl font-medium text-red-100 flex items-center gap-2 mt-2">
-                 <Zap className="w-5 h-5" /> Grid Connection Portal
+                 <Zap className="w-5 h-5" /> PV Grid Connection Portal
                </h2>
              </div>
              <a href="?sender=true" target="_blank" rel="noopener noreferrer" className="bg-red-700 hover:bg-red-800 text-white border border-red-500 px-5 py-2.5 rounded-lg font-bold text-sm transition-colors flex items-center gap-2 whitespace-nowrap shadow-sm">
                Open Live Sender <ExternalLink className="w-4 h-4" />
              </a>
           </div>
+          <div className="flex items-center gap-2 mt-2 border-b border-red-500 pb-px">
+            <button 
+              onClick={() => setActiveTab('inbox')}
+              className={`px-4 py-2 text-sm font-bold tracking-wide uppercase transition-all rounded-t-lg flex items-center gap-2 ${activeTab === 'inbox' ? 'bg-white text-red-600' : 'text-red-100 hover:bg-red-700 hover:text-white'}`}
+            >
+              <LayoutDashboard className="w-4 h-4" /> Inbox Dashboard
+            </button>
+            <button 
+              onClick={() => setActiveTab('crm')}
+              className={`px-4 py-2 text-sm font-bold tracking-wide uppercase transition-all rounded-t-lg flex items-center gap-2 ${activeTab === 'crm' ? 'bg-white text-red-600' : 'text-red-100 hover:bg-red-700 hover:text-white'}`}
+            >
+              <Users className="w-4 h-4" /> CRM Database
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="flex-1 w-full max-w-7xl mx-auto px-4 md:px-6 grid grid-cols-1 lg:grid-cols-12 gap-6 pb-12">
+      <div className="flex-1 w-full max-w-7xl mx-auto px-4 md:px-6 grid grid-cols-1 lg:grid-cols-12 gap-6 pb-12 pt-6">
         
+        {activeTab === 'inbox' && (
+          <>
         {/* Left Column: Inbox Queue (col span 4) */}
         <div className="lg:col-span-4 flex flex-col gap-4 h-[calc(100vh-140px)] sticky top-6">
            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
@@ -534,9 +587,25 @@ export default function App() {
                        {/* Generated Response for non-phone channels */}
                        {activeItem.canonicalData.missing_mandatory_fields.length > 0 && activeItem.channel !== 'phone_call' && (
                          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                           <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center gap-2">
-                             <Mail className="w-4 h-4 text-red-600" />
-                             <h2 className="font-bold text-sm text-gray-800 uppercase tracking-wide">Automated Response (Preview)</h2>
+                           <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center justify-between">
+                             <div className="flex items-center gap-2">
+                               <Mail className="w-4 h-4 text-red-600" />
+                               <h2 className="font-bold text-sm text-gray-800 uppercase tracking-wide">Automated Response (Preview)</h2>
+                             </div>
+                             <div className="flex gap-2">
+                               {activeItem.channel === 'email' && activeItem.canonicalData.applicant.email && (
+                                 <a href={`mailto:${activeItem.canonicalData.applicant.email}?subject=EVH PV Registration Missing Info&body=${encodeURIComponent(generateMissingFieldsResponse(activeItem.canonicalData))}`} 
+                                    className="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm flex items-center gap-1">
+                                   <Send className="w-3 h-3" /> Open in Outlook
+                                 </a>
+                               )}
+                               {activeItem.channel === 'sms' && activeItem.canonicalData.applicant.phone && (
+                                 <a href={`sms:${activeItem.canonicalData.applicant.phone}?body=${encodeURIComponent(generateMissingFieldsResponse(activeItem.canonicalData))}`} 
+                                    className="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm flex items-center gap-1">
+                                   <Send className="w-3 h-3" /> Send SMS
+                                 </a>
+                               )}
+                             </div>
                            </div>
                            <div className="p-5 text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">
                              {generateMissingFieldsResponse(activeItem.canonicalData)}
@@ -578,6 +647,139 @@ export default function App() {
              </div>
           )}
         </div>
+        </>
+        )}
+
+        {activeTab === 'crm' && (
+          <>
+          {/* Left Column: CRM Customer List */}
+          <div className="lg:col-span-4 flex flex-col gap-4 h-[calc(100vh-140px)] sticky top-6">
+             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
+                <div className="bg-gray-50 px-5 py-4 border-b border-gray-200 flex items-center justify-between shrink-0">
+                   <h2 className="font-bold text-gray-800 flex items-center gap-2 uppercase tracking-wide text-sm">
+                      <Users className="w-5 h-5 text-red-600" /> CRM Customers
+                   </h2>
+                   <span className="bg-red-100 text-red-800 text-xs font-bold px-2 py-1 rounded-full">{crmCustomers.length}</span>
+                </div>
+                <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gray-50/30">
+                   {crmCustomers.length === 0 ? (
+                     <p className="text-sm text-gray-500 text-center py-8">No customers in database yet.</p>
+                   ) : (
+                     crmCustomers.map(customer => (
+                       <div 
+                         key={customer.id} 
+                         onClick={() => setActiveCrmCustomerId(customer.id)}
+                         className={`p-4 rounded-lg cursor-pointer transition-all border ${activeCrmCustomerId === customer.id ? 'bg-red-50 border-red-200 shadow-sm' : 'bg-white border-gray-100 hover:border-red-100 hover:bg-gray-50'}`}
+                       >
+                         <div className="flex items-start justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                              <span className={`p-1.5 rounded-md ${activeCrmCustomerId === customer.id ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-600'}`}>
+                                <UserCircle className="w-5 h-5" />
+                              </span>
+                              <span className="font-bold text-sm text-gray-800 truncate max-w-[150px]">{customer.name}</span>
+                            </div>
+                            <div className="flex items-center gap-1 text-xs text-gray-500 font-medium">
+                              <Calendar className="w-3 h-3" /> {new Date(customer.firstContact).toLocaleDateString()}
+                            </div>
+                         </div>
+                         <p className="text-xs text-gray-600 truncate mb-1">Email: {customer.email || 'N/A'}</p>
+                         <p className="text-xs text-gray-600 truncate mb-3">Phone: {customer.phone || 'N/A'}</p>
+                         <div className="flex items-center justify-between">
+                           <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">{customer.logs.length} interactions</span>
+                           <span className={`text-xs font-bold ${customer.status === 'Complete' ? 'text-green-600' : 'text-red-600'}`}>
+                             {customer.status}
+                           </span>
+                         </div>
+                       </div>
+                     ))
+                   )}
+                </div>
+             </div>
+          </div>
+
+          {/* Right Column: CRM Details */}
+          <div className="lg:col-span-8 flex flex-col gap-6">
+            {activeCrmCustomer ? (
+               <div className="grid grid-cols-1 gap-6 items-start">
+                 
+                 <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col">
+                   <div className="bg-red-600 px-6 py-5 border-b border-gray-200 flex items-center justify-between">
+                      <div className="flex items-center gap-3 text-white">
+                        <div className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center">
+                          <UserCircle className="w-8 h-8" />
+                        </div>
+                        <div>
+                          <h2 className="font-bold text-xl">{activeCrmCustomer.name}</h2>
+                          <p className="text-red-100 text-sm">Customer Profile</p>
+                        </div>
+                      </div>
+                      <span className={`px-3 py-1 rounded-full text-xs font-bold ${activeCrmCustomer.status === 'Complete' ? 'bg-green-500 text-white' : 'bg-yellow-400 text-yellow-900'}`}>
+                        {activeCrmCustomer.status === 'Complete' ? 'Complete' : 'Pending'}
+                      </span>
+                   </div>
+                   
+                   <div className="p-6 bg-white grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="space-y-4">
+                         <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100 pb-2">Contact Details</h3>
+                         <div className="flex items-center gap-3 text-sm text-gray-700">
+                           <Mail className="w-4 h-4 text-gray-400" /> {activeCrmCustomer.email || 'Not provided'}
+                         </div>
+                         <div className="flex items-center gap-3 text-sm text-gray-700">
+                           <Phone className="w-4 h-4 text-gray-400" /> {activeCrmCustomer.phone || 'Not provided'}
+                         </div>
+                      </div>
+                      <div className="space-y-4">
+                         <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100 pb-2">Registration Status</h3>
+                         <p className="text-sm text-gray-700">
+                           Latest interaction indicates the application is <strong>{activeCrmCustomer.status}</strong>.
+                         </p>
+                      </div>
+                   </div>
+                   
+                   <div className="bg-gray-50 border-t border-gray-100 p-6">
+                      <h3 className="text-sm font-bold text-gray-800 uppercase tracking-wide flex items-center gap-2 mb-4">
+                         <History className="w-4 h-4 text-red-600" /> Interaction History
+                      </h3>
+                      <div className="space-y-4 relative before:absolute before:inset-0 before:ml-5 before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-gray-200 before:to-transparent">
+                        {activeCrmCustomer.logs.map((log, i) => (
+                           <div key={log.id} className="relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group is-active">
+                             <div className="flex items-center justify-center w-10 h-10 rounded-full border border-gray-200 bg-white text-red-600 shadow-sm shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 z-10">
+                               <Clock className="w-4 h-4" />
+                             </div>
+                             <div className="w-[calc(100%-4rem)] md:w-[calc(50%-2.5rem)] p-4 rounded-xl border border-gray-200 bg-white shadow-sm">
+                               <div className="flex items-center justify-between mb-1">
+                                 <span className="font-bold text-sm text-gray-800 capitalize">{log.channel.replace('_', ' ')}</span>
+                                 <time className="text-xs font-medium text-gray-500">{new Date(log.timestamp).toLocaleString()}</time>
+                               </div>
+                               <div className="text-xs text-gray-600 line-clamp-3 mb-2">{log.text}</div>
+                               <div className="flex justify-between items-center mt-2">
+                                  <span className="text-xs text-gray-500 font-mono">{log.logNumber}</span>
+                                  {log.canonicalData && log.canonicalData.missing_mandatory_fields.length > 0 ? (
+                                    <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded-full">Missing Fields</span>
+                                  ) : log.canonicalData ? (
+                                    <span className="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-full">Data Parsed</span>
+                                  ) : null}
+                               </div>
+                             </div>
+                           </div>
+                        ))}
+                      </div>
+                   </div>
+                   
+                 </div>
+                 
+               </div>
+            ) : (
+               <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-xl border-2 border-dashed border-gray-200 shadow-sm text-gray-400 p-12 min-h-[400px]">
+                  <Users className="w-12 h-12 mb-4 text-gray-300" />
+                  <p className="font-bold text-lg text-gray-500">Select a customer from the CRM</p>
+                  <p className="text-sm mt-1">View complete history and profile details</p>
+               </div>
+            )}
+          </div>
+          </>
+        )}
+
       </div>
     </div>
   );
