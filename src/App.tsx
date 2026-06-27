@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Mail, Phone, Printer, Send, FileJson, FileText, CheckCircle, AlertCircle, Loader2, MessageSquare, Bell, Smartphone, ExternalLink, Zap, Download, Table } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Mail, Phone, Printer, Send, FileJson, FileText, CheckCircle, AlertCircle, Loader2, MessageSquare, Bell, Smartphone, ExternalLink, Zap, Download, Table, Clock, Inbox } from 'lucide-react';
 import { CanonicalData } from './canonical/types';
 import { mapCanonicalToVDE } from './adapters/vde';
 import { generateMissingFieldsResponse } from './respond';
@@ -22,8 +22,8 @@ const playChime = () => {
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(880, ctx.currentTime); // A5
-    osc.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.1); // A6
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.1);
     gain.gain.setValueAtTime(0.5, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
     osc.start(ctx.currentTime);
@@ -102,6 +102,16 @@ function SenderApp() {
   );
 }
 
+type InboxItem = {
+  id: string;
+  logNumber: string;
+  text: string;
+  channel: string;
+  timestamp: number;
+  status: 'pending' | 'processing' | 'processed';
+  canonicalData?: CanonicalData;
+};
+
 export default function App() {
   const isSender = new URLSearchParams(window.location.search).get('sender') === 'true';
 
@@ -109,43 +119,49 @@ export default function App() {
     return <SenderApp />;
   }
 
-  const [inputText, setInputText] = useState(mockInputs.email);
-  const [sourceChannel, setSourceChannel] = useState<'email' | 'fax' | 'phone_call' | 'sms'>('email');
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [canonicalData, setCanonicalData] = useState<CanonicalData | null>(null);
+  const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
+  const [activeItemId, setActiveItemId] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<{id: number, text: string, channel: string}[]>([]);
-  const [processedRecords, setProcessedRecords] = useState<CanonicalData[]>([]);
+  const [excelDownloadUrl, setExcelDownloadUrl] = useState<string>('');
+  const [now, setNow] = useState(Date.now());
 
-  const handleProcess = async (overrideText?: string, overrideChannel?: string) => {
-    const textToProcess = overrideText ?? inputText;
-    const channelToProcess = overrideChannel ?? sourceChannel;
-    
-    setIsProcessing(true);
-    setCanonicalData(null);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 10000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const activeItem = useMemo(() => inboxItems.find(i => i.id === activeItemId), [inboxItems, activeItemId]);
+  const processedRecords = useMemo(() => inboxItems.filter(i => i.status === 'processed' && i.canonicalData), [inboxItems]);
+
+  const handleProcess = async (itemToProcess: InboxItem) => {
+    setInboxItems(prev => prev.map(item => item.id === itemToProcess.id ? { ...item, status: 'processing' } : item));
     try {
       const response = await fetch('/api/parse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: textToProcess, source_channel: channelToProcess })
+        body: JSON.stringify({ text: itemToProcess.text, source_channel: itemToProcess.channel })
       });
       const data = await response.json();
       if (data.parsed) {
-        setCanonicalData(data.parsed);
-        setProcessedRecords(prev => [...prev, data.parsed]);
+        setInboxItems(prev => prev.map(item => 
+          item.id === itemToProcess.id 
+            ? { ...item, status: 'processed', canonicalData: data.parsed }
+            : item
+        ));
       } else {
         alert(data.error || 'Failed to parse');
+        setInboxItems(prev => prev.map(item => item.id === itemToProcess.id ? { ...item, status: 'pending' } : item));
       }
     } catch (err) {
       alert('Error connecting to server');
-    } finally {
-      setIsProcessing(false);
+      setInboxItems(prev => prev.map(item => item.id === itemToProcess.id ? { ...item, status: 'pending' } : item));
     }
   };
 
   const handleUpdateData = (update: any) => {
-    if (!canonicalData) return;
+    if (!activeItem || !activeItem.canonicalData) return;
 
-    // Create a new updated canonical record
+    const canonicalData = activeItem.canonicalData;
     const updatedData: CanonicalData = { 
       ...canonicalData,
       applicant: { ...canonicalData.applicant },
@@ -167,39 +183,42 @@ export default function App() {
     const validation = validateCanonicalData(updatedData);
     updatedData.missing_mandatory_fields = validation.missing;
 
-    setCanonicalData(updatedData);
-
-    // Update the record in processedRecords (matching by reference, or just updating the last one since we are viewing it)
-    setProcessedRecords(prev => {
-      const newRecords = [...prev];
-      if (newRecords.length > 0) {
-        newRecords[newRecords.length - 1] = updatedData;
-      }
-      return newRecords;
-    });
+    setInboxItems(prev => prev.map(item => 
+      item.id === activeItem.id 
+        ? { ...item, canonicalData: updatedData }
+        : item
+    ));
   };
 
-  const exportToExcel = () => {
-    if (processedRecords.length === 0) return;
+  useEffect(() => {
+    if (processedRecords.length === 0) {
+      if (excelDownloadUrl) {
+        URL.revokeObjectURL(excelDownloadUrl);
+        setExcelDownloadUrl('');
+      }
+      return;
+    }
     
     const exportData = processedRecords.map((record, index) => {
-      const vde = mapCanonicalToVDE(record);
+      const can = record.canonicalData!;
+      const vde = mapCanonicalToVDE(can);
       return {
+        "Log Number": record.logNumber,
         "Record ID": index + 1,
-        "Source Channel": record.source_channel ? record.source_channel.toUpperCase() : "UNKNOWN",
-        "Applicant First Name": record.applicant.firstName || "",
-        "Applicant Last Name": record.applicant.lastName || "",
-        "Applicant Email": record.applicant.email || "",
-        "Applicant Phone": record.applicant.phone || "",
-        "Location Street": record.location.street || "",
-        "Location ZIP Code": record.location.zipCode || "",
-        "Location City": record.location.city || "",
-        "System Power (kW)": record.technical.powerKw || "",
-        "Is PV System": record.technical.isPvSystem ? "Yes" : "No",
-        "Bank IBAN": record.financial.iban || "",
-        "Sentiment Analysis": record.sentiment || "Unknown",
-        "Application Status": record.missing_mandatory_fields.length === 0 ? "Complete" : "Incomplete",
-        "Missing Fields": record.missing_mandatory_fields.join(", ") || "None",
+        "Source Channel": can.source_channel ? can.source_channel.toUpperCase() : "UNKNOWN",
+        "Applicant First Name": can.applicant.firstName || "",
+        "Applicant Last Name": can.applicant.lastName || "",
+        "Applicant Email": can.applicant.email || "",
+        "Applicant Phone": can.applicant.phone || "",
+        "Location Street": can.location.street || "",
+        "Location ZIP Code": can.location.zipCode || "",
+        "Location City": can.location.city || "",
+        "System Power (kW)": can.technical.powerKw || "",
+        "Is PV System": can.technical.isPvSystem ? "Yes" : "No",
+        "Bank IBAN": can.financial.iban || "",
+        "Sentiment Analysis": can.sentiment || "Unknown",
+        "Application Status": can.missing_mandatory_fields.length === 0 ? "Complete" : "Incomplete",
+        "Missing Fields": can.missing_mandatory_fields.join(", ") || "None",
         "VDE_1102_Vorname": vde["1102"] || "",
         "VDE_1101_Name": vde["1101"] || "",
         "VDE_1110_Email": vde["1110"] || "",
@@ -217,48 +236,95 @@ export default function App() {
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "TINA_Import_Data");
     
-    XLSX.writeFile(workbook, "Netz_Halle_TINA_Export.xlsx");
-  };
+    const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([wbout], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    
+    setExcelDownloadUrl(url);
+
+    return () => URL.revokeObjectURL(url);
+  }, [processedRecords]);
 
   useEffect(() => {
+    const initialItem: InboxItem = {
+      id: "mock-1",
+      logNumber: "LOG-9021",
+      text: mockInputs.email,
+      channel: "email",
+      timestamp: Date.now() - 1000 * 60 * 5,
+      status: 'pending'
+    };
+    setInboxItems([initialItem]);
+    setActiveItemId(initialItem.id);
+
     const sse = new EventSource('/api/stream');
-    sse.onmessage = (e) => {
+    sse.onmessage = async (e) => {
       const data = JSON.parse(e.data);
       playChime();
       
       const newNotif = { id: Date.now(), text: data.text, channel: data.source_channel };
       setNotifications(prev => [...prev, newNotif]);
-      
-      setTimeout(() => {
-        setNotifications(prev => prev.filter(n => n.id !== newNotif.id));
-      }, 5000);
+      setTimeout(() => { setNotifications(prev => prev.filter(n => n.id !== newNotif.id)); }, 5000);
 
-      setSourceChannel(data.source_channel);
-      setInputText(data.text);
+      const newItem: InboxItem = {
+        id: Date.now().toString(),
+        logNumber: `LOG-${Math.floor(Math.random() * 90000) + 10000}`,
+        text: data.text,
+        channel: data.source_channel,
+        timestamp: Date.now(),
+        status: 'processing'
+      };
       
-      // Auto trigger processing for the live effect
-      handleProcess(data.text, data.source_channel);
+      setInboxItems(prev => [newItem, ...prev]);
+      setActiveItemId(newItem.id);
+      
+      try {
+        const response = await fetch('/api/parse', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: data.text, source_channel: data.source_channel })
+        });
+        const parseData = await response.json();
+        if (parseData.parsed) {
+          setInboxItems(prev => prev.map(item => 
+            item.id === newItem.id 
+              ? { ...item, status: 'processed', canonicalData: parseData.parsed }
+              : item
+          ));
+        } else {
+          setInboxItems(prev => prev.map(item => item.id === newItem.id ? { ...item, status: 'pending' } : item));
+        }
+      } catch (err) {
+        setInboxItems(prev => prev.map(item => item.id === newItem.id ? { ...item, status: 'pending' } : item));
+      }
     };
     return () => sse.close();
   }, []);
 
-  const getSourceIcon = (channel = sourceChannel) => {
+  const getSourceIcon = (channel: string) => {
     if (channel === 'email') return <Mail className="w-5 h-5" />;
     if (channel === 'fax') return <Printer className="w-5 h-5" />;
     if (channel === 'phone_call') return <Phone className="w-5 h-5" />;
     if (channel === 'sms') return <MessageSquare className="w-5 h-5" />;
-    return null;
+    return <Mail className="w-5 h-5" />;
+  };
+
+  const getTimeAgo = (timestamp: number) => {
+    const diff = Math.max(0, Math.floor((now - timestamp) / 1000));
+    if (diff < 60) return `${diff}s ago`;
+    const m = Math.floor(diff / 60);
+    if (m < 60) return `${m}m ago`;
+    return `${Math.floor(m / 60)}h ago`;
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans relative overflow-x-hidden">
-      
+    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans relative flex flex-col">
       {/* Toast Notifications */}
       <div className="fixed top-6 right-6 z-50 flex flex-col gap-3 pointer-events-none">
         {notifications.map(n => (
           <div key={n.id} className="bg-white border-l-4 border-red-600 shadow-2xl p-4 rounded-lg w-80 animate-in slide-in-from-right fade-in duration-300 pointer-events-auto">
             <h4 className="font-bold text-red-600 flex items-center gap-2 mb-1 uppercase tracking-wide text-xs">
-              <Bell className="w-4 h-4 animate-bounce" /> New {n.channel} Received
+              <Bell className="w-4 h-4 animate-bounce" /> New {n.channel.replace('_', ' ')} Received
             </h4>
             <p className="text-sm text-gray-700 truncate font-medium">{n.text}</p>
           </div>
@@ -266,233 +332,252 @@ export default function App() {
       </div>
 
       {/* Header */}
-      <header className="bg-red-600 text-white py-6 px-6 shadow-md mb-8">
-        <div className="max-w-6xl mx-auto flex flex-col gap-2">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center shadow-sm">
-              <div className="w-6 h-6 bg-red-600 rounded-sm transform rotate-45"></div>
-            </div>
-            <h1 className="text-3xl font-bold tracking-tight">Netz Halle</h1>
+      <header className="bg-red-600 text-white py-6 px-6 shadow-md mb-6 shrink-0">
+        <div className="max-w-7xl mx-auto flex flex-col gap-2">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+             <div>
+               <div className="flex items-center gap-3">
+                 <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center shadow-sm">
+                   <div className="w-6 h-6 bg-red-600 rounded-sm transform rotate-45"></div>
+                 </div>
+                 <h1 className="text-3xl font-bold tracking-tight">Netz Halle</h1>
+               </div>
+               <h2 className="text-xl font-medium text-red-100 flex items-center gap-2 mt-2">
+                 <Zap className="w-5 h-5" /> Grid Connection Portal
+               </h2>
+             </div>
+             <a href="?sender=true" target="_blank" rel="noopener noreferrer" className="bg-red-700 hover:bg-red-800 text-white border border-red-500 px-5 py-2.5 rounded-lg font-bold text-sm transition-colors flex items-center gap-2 whitespace-nowrap shadow-sm">
+               Open Live Sender <ExternalLink className="w-4 h-4" />
+             </a>
           </div>
-          <h2 className="text-xl font-medium text-red-100 flex items-center gap-2">
-            <Zap className="w-5 h-5" /> Grid Connection Portal
-          </h2>
-          <p className="text-red-200 mt-1">Translation layer: Unstructured Inputs → Canonical JSON → VDE Target Format.</p>
         </div>
       </header>
 
-      <div className="max-w-6xl mx-auto space-y-8 px-6 pb-12">
-
-        {/* Live Demo Instruction Bar */}
-        <div className="bg-white p-5 rounded-xl shadow-sm border border-red-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-           <div className="flex items-center gap-4">
-             <div className="bg-red-100 p-3 rounded-full text-red-600 shadow-sm relative">
-               <Smartphone className="w-6 h-6" />
-               <span className="absolute top-0 right-0 w-3 h-3 bg-red-500 rounded-full animate-ping"></span>
-             </div>
-             <div>
-               <h3 className="font-bold text-gray-800 text-lg">Live Demo Mode Active</h3>
-               <p className="text-sm text-gray-500">Open the Sender App on another device to simulate real-time incoming messages.</p>
-             </div>
-           </div>
-           <a href="?sender=true" target="_blank" rel="noopener noreferrer" className="bg-red-50 text-red-600 hover:bg-red-100 px-5 py-2.5 rounded-lg font-bold text-sm transition-colors flex items-center gap-2 whitespace-nowrap">
-             Open Live Sender <ExternalLink className="w-4 h-4" />
-           </a>
-        </div>
-
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          
-          {/* Left Column: Input */}
-          <div className="space-y-6">
-            <div className={`bg-white rounded-xl shadow-md border overflow-hidden flex flex-col transition-colors duration-500 ${isProcessing ? 'border-red-300' : 'border-gray-100'}`}>
-              <div className="bg-white px-5 py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-4">
-                <h2 className="font-semibold text-gray-800 flex items-center gap-2">
-                  {getSourceIcon()} Input Channel
-                </h2>
-                <div className="flex gap-1 bg-gray-100 p-1 rounded-full">
-                  {(['email', 'sms', 'phone_call', 'fax'] as const).map(ch => (
-                    <button 
-                      key={ch}
-                      onClick={() => { setSourceChannel(ch); setInputText(mockInputs[ch]); }}
-                      className={`px-3 py-1.5 text-xs font-bold rounded-full transition-all duration-200 uppercase tracking-wide ${sourceChannel === ch ? 'bg-red-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
-                    >
-                      {ch.replace('_', ' ')}
-                    </button>
-                  ))}
-                </div>
+      <div className="flex-1 w-full max-w-7xl mx-auto px-4 md:px-6 grid grid-cols-1 lg:grid-cols-12 gap-6 pb-12">
+        
+        {/* Left Column: Inbox Queue (col span 4) */}
+        <div className="lg:col-span-4 flex flex-col gap-4 h-[calc(100vh-140px)] sticky top-6">
+           <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
+              <div className="bg-gray-50 px-5 py-4 border-b border-gray-200 flex items-center justify-between shrink-0">
+                 <h2 className="font-bold text-gray-800 flex items-center gap-2 uppercase tracking-wide text-sm">
+                    <Inbox className="w-5 h-5 text-red-600" /> Incoming Queue
+                 </h2>
+                 <span className="bg-red-100 text-red-800 text-xs font-bold px-2 py-1 rounded-full">{inboxItems.length}</span>
               </div>
-              <div className="p-5 flex-1 bg-gray-50/50 relative">
-                {isProcessing && (
-                  <div className="absolute inset-0 bg-white/60 backdrop-blur-[1px] flex items-center justify-center z-10">
-                     <div className="bg-white px-4 py-2 rounded-full shadow-lg border border-gray-100 text-red-600 font-bold text-sm flex items-center gap-2">
-                       <Loader2 className="w-4 h-4 animate-spin" /> Extracting Data...
+              <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gray-50/30">
+                 {inboxItems.length === 0 ? (
+                   <p className="text-sm text-gray-500 text-center py-8">Queue is empty</p>
+                 ) : (
+                   inboxItems.map(item => (
+                     <div 
+                       key={item.id} 
+                       onClick={() => setActiveItemId(item.id)}
+                       className={`p-4 rounded-lg cursor-pointer transition-all border ${activeItemId === item.id ? 'bg-red-50 border-red-200 shadow-sm' : 'bg-white border-gray-100 hover:border-red-100 hover:bg-gray-50'}`}
+                     >
+                       <div className="flex items-start justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className={`p-1.5 rounded-md ${activeItemId === item.id ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-600'}`}>
+                              {getSourceIcon(item.channel)}
+                            </span>
+                            <span className="font-bold text-sm text-gray-800">{item.logNumber}</span>
+                          </div>
+                          <div className="flex items-center gap-1 text-xs text-gray-500 font-medium">
+                            <Clock className="w-3 h-3" /> {getTimeAgo(item.timestamp)}
+                          </div>
+                       </div>
+                       <p className="text-xs text-gray-600 line-clamp-2 leading-relaxed mb-3">{item.text}</p>
+                       <div className="flex items-center justify-between">
+                         <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">{item.channel.replace('_', ' ')}</span>
+                         {item.status === 'pending' && <span className="flex h-2.5 w-2.5 bg-yellow-400 rounded-full" title="Pending"></span>}
+                         {item.status === 'processing' && <Loader2 className="w-3.5 h-3.5 text-red-500 animate-spin" />}
+                         {item.status === 'processed' && <span className="flex h-2.5 w-2.5 bg-green-500 rounded-full" title="Processed"></span>}
+                       </div>
                      </div>
-                  </div>
-                )}
-                <textarea 
-                  className="w-full h-48 lg:h-64 resize-none outline-none text-sm text-gray-700 leading-relaxed font-mono bg-transparent"
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  placeholder="Message text..."
-                />
+                   ))
+                 )}
               </div>
-              <div className="p-5 border-t border-gray-100 bg-white flex justify-end">
-                <button 
-                  onClick={() => handleProcess()}
-                  disabled={isProcessing}
-                  className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 flex items-center gap-2 shadow-sm disabled:opacity-70 disabled:cursor-not-allowed transform hover:-translate-y-0.5"
-                >
-                  <Send className="w-4 h-4" />
-                  Process Manually
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Right Column: Output */}
-          <div className="space-y-6">
-            {!canonicalData && !isProcessing && (
-              <div className="h-full flex flex-col items-center justify-center text-gray-400 border-2 border-dashed border-gray-200 rounded-xl p-10 text-center bg-white shadow-sm">
-                <FileJson className="w-12 h-12 mb-4 text-gray-300" />
-                <p className="text-lg font-bold text-gray-500">Waiting for data...</p>
-                <p className="text-sm mt-2">Send a message from the Live Sender or click "Process Manually".</p>
-              </div>
-            )}
-
-            {isProcessing && (
-              <div className="h-full flex flex-col items-center justify-center text-gray-500 rounded-xl p-10 bg-white border border-red-100 shadow-md">
-                <div className="relative">
-                  <div className="absolute inset-0 bg-red-100 rounded-full animate-ping opacity-75"></div>
-                  <Loader2 className="w-12 h-12 animate-spin relative text-red-600" />
-                </div>
-                <p className="text-sm font-bold mt-6 tracking-wide text-red-600 animate-pulse uppercase">AI Engine Processing...</p>
-              </div>
-            )}
-
-            {canonicalData && (
-              <div className="space-y-5 animate-in fade-in slide-in-from-bottom-8 duration-500">
-                
-                {/* Status Card */}
-                <div className={`p-5 rounded-xl border flex items-start gap-4 shadow-sm ${canonicalData.missing_mandatory_fields.length === 0 ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
-                  {canonicalData.missing_mandatory_fields.length === 0 ? (
-                     <CheckCircle className="w-7 h-7 text-green-600 mt-0.5 flex-shrink-0" />
-                  ) : (
-                     <AlertCircle className="w-7 h-7 text-red-600 mt-0.5 flex-shrink-0" />
-                  )}
-                  <div>
-                    <h3 className={`font-bold text-lg ${canonicalData.missing_mandatory_fields.length === 0 ? 'text-green-800' : 'text-red-800'}`}>
-                      {canonicalData.missing_mandatory_fields.length === 0 ? 'Data Extraction Complete' : 'Incomplete Application'}
-                    </h3>
-                    <p className={`text-sm mt-1 leading-relaxed ${canonicalData.missing_mandatory_fields.length === 0 ? 'text-green-700' : 'text-red-700'}`}>
-                      {canonicalData.missing_mandatory_fields.length === 0 
-                        ? 'All required fields were successfully detected and mapped.' 
-                        : `${canonicalData.missing_mandatory_fields.length} mandatory field(s) are missing and need to be requested from the customer.`}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Canonical JSON */}
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                  <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center gap-2">
-                    <FileJson className="w-4 h-4 text-red-600" />
-                    <h2 className="font-bold text-sm text-gray-800 uppercase tracking-wide">Canonical JSON</h2>
-                  </div>
-                  <div className="p-5 bg-gray-900 text-green-400 overflow-auto max-h-64 text-xs font-mono rounded-b-xl">
-                    <pre>{JSON.stringify(canonicalData, null, 2)}</pre>
-                  </div>
-                </div>
-
-                {/* VDE Target Format */}
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                  <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center gap-2">
-                    <FileText className="w-4 h-4 text-red-600" />
-                    <h2 className="font-bold text-sm text-gray-800 uppercase tracking-wide">Internal Target Format (VDE Mapping)</h2>
-                  </div>
-                  <div className="p-5 bg-gray-50 text-gray-800 overflow-auto max-h-64 text-xs font-mono rounded-b-xl border-t border-gray-100">
-                    <pre>{JSON.stringify(mapCanonicalToVDE(canonicalData), null, 2)}</pre>
-                  </div>
-                </div>
-
-                {/* Generated Response */}
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                  <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center gap-2">
-                    <Mail className="w-4 h-4 text-red-600" />
-                    <h2 className="font-bold text-sm text-gray-800 uppercase tracking-wide">Automated Response (Preview)</h2>
-                  </div>
-                  <div className="p-5 text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">
-                    {generateMissingFieldsResponse(canonicalData)}
-                  </div>
-                </div>
-
-                {/* Live AI Voice Assistant Callback */}
-                {canonicalData.missing_mandatory_fields.length > 0 && sourceChannel === 'phone_call' && (
-                  <LiveCall 
-                    missingFields={canonicalData.missing_mandatory_fields.join(", ")} 
-                    customerName={canonicalData.applicant.firstName ? `${canonicalData.applicant.firstName} ${canonicalData.applicant.lastName || ''}`.trim() : 'Customer'}
-                    onDataUpdate={handleUpdateData}
-                  />
-                )}
-
-              </div>
-            )}
-          </div>
+           </div>
         </div>
 
-        {/* TINA Integrations Table */}
-        {processedRecords.length > 0 && (
-          <div className="bg-white rounded-xl shadow-md border border-gray-100 overflow-hidden mt-8">
-            <div className="bg-red-600 px-6 py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <Table className="w-6 h-6 text-white" />
-                <h2 className="font-bold text-lg text-white uppercase tracking-wide">TINA Master Records ({processedRecords.length})</h2>
-              </div>
-              <button 
-                onClick={exportToExcel}
-                className="bg-white text-red-600 hover:bg-red-50 px-5 py-2.5 rounded-lg font-bold text-sm transition-all shadow-sm flex items-center gap-2 transform hover:-translate-y-0.5"
-              >
-                <Download className="w-4 h-4" /> Export to Excel
-              </button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left text-gray-600">
-                <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b border-gray-100">
-                  <tr>
-                    <th className="px-6 py-4 font-bold">ID</th>
-                    <th className="px-6 py-4 font-bold">Channel</th>
-                    <th className="px-6 py-4 font-bold">First Name</th>
-                    <th className="px-6 py-4 font-bold">Last Name</th>
-                    <th className="px-6 py-4 font-bold">Power (kW)</th>
-                    <th className="px-6 py-4 font-bold">Status</th>
-                    <th className="px-6 py-4 font-bold">Missing Fields</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {processedRecords.map((record, idx) => (
-                    <tr key={idx} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-6 py-4 font-medium text-gray-900">{idx + 1}</td>
-                      <td className="px-6 py-4 uppercase tracking-wider text-xs font-semibold text-gray-500">{record.source_channel}</td>
-                      <td className="px-6 py-4">{record.applicant.firstName || '-'}</td>
-                      <td className="px-6 py-4">{record.applicant.lastName || '-'}</td>
-                      <td className="px-6 py-4 font-mono">{record.technical.powerKw ? `${record.technical.powerKw} kW` : '-'}</td>
-                      <td className="px-6 py-4">
-                        {record.missing_mandatory_fields.length === 0 ? (
-                          <span className="bg-green-100 text-green-800 text-xs font-bold px-2.5 py-1 rounded-full border border-green-200">Complete</span>
-                        ) : (
-                          <span className="bg-red-100 text-red-800 text-xs font-bold px-2.5 py-1 rounded-full border border-red-200">Incomplete</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 text-xs text-gray-500 max-w-xs truncate" title={record.missing_mandatory_fields.join(", ")}>
-                        {record.missing_mandatory_fields.length > 0 ? record.missing_mandatory_fields.length + " missing" : "None"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
+        {/* Right Column: Detail View (col span 8) */}
+        <div className="lg:col-span-8 flex flex-col gap-6">
+          {activeItem ? (
+             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+               {/* Left Half: Original Message & Processing */}
+               <div className="flex flex-col gap-6">
+                 <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col">
+                   <div className="bg-gray-50 px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+                      <h2 className="font-semibold text-gray-800 flex items-center gap-2 text-sm">
+                        {getSourceIcon(activeItem.channel)} Original Message ({activeItem.logNumber})
+                      </h2>
+                   </div>
+                   <div className="p-5 bg-white">
+                     <textarea 
+                       readOnly
+                       className="w-full h-48 resize-none outline-none text-sm text-gray-700 leading-relaxed font-mono bg-gray-50 p-4 rounded-lg border border-gray-100"
+                       value={activeItem.text}
+                     />
+                   </div>
+                   <div className="p-4 border-t border-gray-100 bg-gray-50 flex justify-end">
+                     {activeItem.status === 'pending' ? (
+                       <button 
+                         onClick={() => handleProcess(activeItem)}
+                         className="bg-red-600 hover:bg-red-700 text-white px-5 py-2 rounded-lg text-sm font-bold transition-all duration-200 flex items-center gap-2 shadow-sm"
+                       >
+                         <Send className="w-4 h-4" /> Process Now
+                       </button>
+                     ) : activeItem.status === 'processing' ? (
+                       <button disabled className="bg-gray-400 text-white px-5 py-2 rounded-lg text-sm font-bold flex items-center gap-2">
+                         <Loader2 className="w-4 h-4 animate-spin" /> Processing...
+                       </button>
+                     ) : (
+                       <button disabled className="bg-green-600 text-white px-5 py-2 rounded-lg text-sm font-bold flex items-center gap-2">
+                         <CheckCircle className="w-4 h-4" /> Processed
+                       </button>
+                     )}
+                   </div>
+                 </div>
 
+                 {/* TINA Integrations Table (Appears below message if processed) */}
+                 {processedRecords.length > 0 && activeItem.status === 'processed' && (
+                   <div className="bg-white rounded-xl shadow-md border border-gray-100 overflow-hidden">
+                      <div className="bg-red-600 px-5 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <Table className="w-5 h-5 text-white" />
+                          <h2 className="font-bold text-sm text-white uppercase tracking-wide">TINA Master Records ({processedRecords.length})</h2>
+                        </div>
+                        {excelDownloadUrl && (
+                          <a 
+                            href={excelDownloadUrl}
+                            download="netz-halle-registrations.xlsx"
+                            className="bg-white text-red-600 hover:bg-red-50 px-4 py-1.5 rounded-md font-bold text-xs transition-all shadow-sm flex items-center gap-2"
+                          >
+                            <Download className="w-3.5 h-3.5" /> Export DB to Excel
+                          </a>
+                        )}
+                      </div>
+                      <div className="overflow-x-auto max-h-[400px]">
+                        <table className="w-full text-xs text-left text-gray-600">
+                          <thead className="text-[10px] text-gray-700 uppercase bg-gray-50 border-b border-gray-100 sticky top-0">
+                            <tr>
+                              <th className="px-4 py-3 font-bold">Log</th>
+                              <th className="px-4 py-3 font-bold">Name</th>
+                              <th className="px-4 py-3 font-bold">Power</th>
+                              <th className="px-4 py-3 font-bold">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {processedRecords.map((record) => (
+                              <tr key={record.id} className={`hover:bg-gray-50 transition-colors ${record.id === activeItem.id ? 'bg-red-50/50' : ''}`}>
+                                <td className="px-4 py-3 font-bold text-gray-900">{record.logNumber}</td>
+                                <td className="px-4 py-3 truncate max-w-[100px]">{(record.canonicalData?.applicant.firstName || '') + ' ' + (record.canonicalData?.applicant.lastName || '')}</td>
+                                <td className="px-4 py-3 font-mono">{record.canonicalData?.technical.powerKw ? `${record.canonicalData.technical.powerKw} kW` : '-'}</td>
+                                <td className="px-4 py-3">
+                                  {record.canonicalData?.missing_mandatory_fields.length === 0 ? (
+                                    <span className="text-green-600 font-bold">Complete</span>
+                                  ) : (
+                                    <span className="text-red-600 font-bold" title={record.canonicalData?.missing_mandatory_fields.join(", ")}>Incomplete</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                   </div>
+                 )}
+               </div>
+
+               {/* Right Half: Output Data */}
+               <div className="space-y-6">
+                 {activeItem.status === 'processing' && (
+                   <div className="h-full min-h-[300px] flex flex-col items-center justify-center text-gray-500 rounded-xl p-10 bg-white border border-red-100 shadow-md">
+                      <div className="relative">
+                        <div className="absolute inset-0 bg-red-100 rounded-full animate-ping opacity-75"></div>
+                        <Loader2 className="w-12 h-12 animate-spin relative text-red-600" />
+                      </div>
+                      <p className="text-sm font-bold mt-6 tracking-wide text-red-600 animate-pulse uppercase">AI Engine Processing...</p>
+                   </div>
+                 )}
+
+                 {activeItem.status === 'processed' && activeItem.canonicalData && (
+                    <div className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-300">
+                       
+                       {/* Status Card */}
+                       <div className={`p-5 rounded-xl border flex items-start gap-4 shadow-sm ${activeItem.canonicalData.missing_mandatory_fields.length === 0 ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
+                         {activeItem.canonicalData.missing_mandatory_fields.length === 0 ? (
+                            <CheckCircle className="w-7 h-7 text-green-600 mt-0.5 flex-shrink-0" />
+                         ) : (
+                            <AlertCircle className="w-7 h-7 text-red-600 mt-0.5 flex-shrink-0" />
+                         )}
+                         <div>
+                           <h3 className={`font-bold text-lg ${activeItem.canonicalData.missing_mandatory_fields.length === 0 ? 'text-green-800' : 'text-red-800'}`}>
+                             {activeItem.canonicalData.missing_mandatory_fields.length === 0 ? 'Data Extraction Complete' : 'Incomplete Application'}
+                           </h3>
+                           <p className={`text-sm mt-1 leading-relaxed ${activeItem.canonicalData.missing_mandatory_fields.length === 0 ? 'text-green-700' : 'text-red-700'}`}>
+                             {activeItem.canonicalData.missing_mandatory_fields.length === 0 
+                               ? 'All required fields were successfully detected and mapped.' 
+                               : `${activeItem.canonicalData.missing_mandatory_fields.length} mandatory field(s) are missing and need to be requested from the customer.`}
+                           </p>
+                         </div>
+                       </div>
+
+                       {/* Live AI Voice Assistant Callback */}
+                       {activeItem.canonicalData.missing_mandatory_fields.length > 0 && activeItem.channel === 'phone_call' && (
+                         <LiveCall 
+                           missingFields={activeItem.canonicalData.missing_mandatory_fields.join(", ")} 
+                           customerName={activeItem.canonicalData.applicant.firstName ? `${activeItem.canonicalData.applicant.firstName} ${activeItem.canonicalData.applicant.lastName || ''}`.trim() : 'Customer'}
+                           onDataUpdate={handleUpdateData}
+                         />
+                       )}
+
+                       {/* Generated Response for non-phone channels */}
+                       {activeItem.canonicalData.missing_mandatory_fields.length > 0 && activeItem.channel !== 'phone_call' && (
+                         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                           <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center gap-2">
+                             <Mail className="w-4 h-4 text-red-600" />
+                             <h2 className="font-bold text-sm text-gray-800 uppercase tracking-wide">Automated Response (Preview)</h2>
+                           </div>
+                           <div className="p-5 text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">
+                             {generateMissingFieldsResponse(activeItem.canonicalData)}
+                           </div>
+                         </div>
+                       )}
+
+                       {/* Canonical JSON */}
+                       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                         <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center gap-2">
+                           <FileJson className="w-4 h-4 text-red-600" />
+                           <h2 className="font-bold text-sm text-gray-800 uppercase tracking-wide">Canonical JSON</h2>
+                         </div>
+                         <div className="p-4 bg-gray-900 text-green-400 overflow-auto max-h-64 text-xs font-mono rounded-b-xl">
+                           <pre>{JSON.stringify(activeItem.canonicalData, null, 2)}</pre>
+                         </div>
+                       </div>
+
+                       {/* VDE Target Format */}
+                       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                         <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center gap-2">
+                           <FileText className="w-4 h-4 text-red-600" />
+                           <h2 className="font-bold text-sm text-gray-800 uppercase tracking-wide">Internal Target Format (VDE Mapping)</h2>
+                         </div>
+                         <div className="p-4 bg-gray-50 text-gray-800 overflow-auto max-h-64 text-xs font-mono rounded-b-xl border-t border-gray-100">
+                           <pre>{JSON.stringify(mapCanonicalToVDE(activeItem.canonicalData), null, 2)}</pre>
+                         </div>
+                       </div>
+
+                    </div>
+                 )}
+               </div>
+             </div>
+          ) : (
+             <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-xl border-2 border-dashed border-gray-200 shadow-sm text-gray-400 p-12 min-h-[400px]">
+                <Inbox className="w-12 h-12 mb-4 text-gray-300" />
+                <p className="font-bold text-lg text-gray-500">Select an item from the queue</p>
+                <p className="text-sm mt-1">View message details and processing status</p>
+             </div>
+          )}
+        </div>
       </div>
     </div>
   );
